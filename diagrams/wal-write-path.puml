@@ -1,0 +1,31 @@
+@startuml
+!include style.puml
+
+title PWasm WAL-Oriented Write Path
+caption External research note; update caption with Wizard Engine commit hash/date.
+
+actor Caller
+participant "PWRegion / transaction layer" as PW
+participant "WAL BackendRegion" as WALRegion
+participant "Data BackendRegion" as DataRegion
+participant "TxnRegionBackend" as Backend
+
+Caller -> PW : begin update
+
+PW -> WALRegion : write log record bytes
+PW -> WALRegion : persistRange(logOffset, logSize)
+WALRegion -> Backend : persistRange(region, offset, size)
+Backend --> WALRegion : WAL bytes durable
+
+PW -> DataRegion : mutate ordinary data bytes
+PW -> DataRegion : markDirty(dataOffset, dataSize)
+DataRegion -> Backend : markDirty(region, offset, size)
+
+PW -> DataRegion : persistChanges()
+DataRegion -> Backend : persistChanges(region)
+Backend --> DataRegion : dirty changes durable/prepared
+
+PW -> WALRegion : write commit/header update
+PW -> WALRegion : persistRange(headerOffset, headerSize)
+
+@enduml

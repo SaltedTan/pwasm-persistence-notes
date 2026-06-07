@@ -1,0 +1,10 @@
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+hide empty members
+
+skinparam packageStyle rectangle
+
+skinparam note {
+  BackgroundColor #fff8dc
+  BorderColor #999999
+}

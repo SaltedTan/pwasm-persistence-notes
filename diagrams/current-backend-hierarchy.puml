@@ -1,0 +1,88 @@
+@startuml
+!include style.puml
+
+title PWasm Persistence Backend: Current Class Structure
+caption External research note; update caption with Wizard Engine commit hash/date.
+
+package "Portable API" {
+  class BackendRegion {
+    +range: Range<byte>
+    +backend: TxnRegionBackend
+    +markDirty(offset: u64, size: u64): bool
+    +persistChanges(): bool
+    +persistRange(offset: u64, size: u64): bool
+  }
+
+  abstract class TxnRegionBackend {
+    +create(size: u64, prot: int): BackendRegion
+    +destroy(region: BackendRegion)
+    +markDirty(region: BackendRegion, offset: u64, size: u64): bool
+    +persistChanges(region: BackendRegion): bool
+    +persistRange(region: BackendRegion, offset: u64, size: u64): bool
+    +isPersistent(): bool
+    +name(): string
+  }
+
+  class VolatileBackend
+}
+
+package "x86-64 mmap implementation" {
+  class FdMmapRegion {
+    +mapping: Mapping
+    +fd: int
+  }
+
+  class FileMmapRegion {
+    +hasDirtyChanges: bool
+  }
+
+  class PmemMmapRegion {
+    +hasPendingWriteback: bool
+  }
+
+  abstract class MmapTxnRegionBackend {
+    +destroy(region: BackendRegion)
+    +validRange(region: BackendRegion, offset: u64, size: u64): bool
+    +asFdRegion(region: BackendRegion): FdMmapRegion
+    +closeFdRegion(region: BackendRegion)
+  }
+
+  class PmemMmapBackend
+  class FileMmapBackend
+}
+
+BackendRegion --> TxnRegionBackend : delegates to
+
+TxnRegionBackend <|-- VolatileBackend
+TxnRegionBackend <|-- MmapTxnRegionBackend
+MmapTxnRegionBackend <|-- PmemMmapBackend
+MmapTxnRegionBackend <|-- FileMmapBackend
+
+BackendRegion <|-- FdMmapRegion
+FdMmapRegion <|-- FileMmapRegion
+FdMmapRegion <|-- PmemMmapRegion
+
+PmemMmapBackend ..> PmemMmapRegion : downcasts
+FileMmapBackend ..> FileMmapRegion : downcasts
+
+note right of TxnRegionBackend
+Design question:
+Should the backend interface own all region operations,
+or should region objects become typed capabilities?
+end note
+
+note bottom of PmemMmapBackend
+PMEM path:
+markDirty flushes cache lines;
+persistChanges issues the fence;
+persistRange flushes and fences immediately.
+end note
+
+note bottom of FileMmapBackend
+File mmap path:
+markDirty records dirty state;
+persistChanges calls fdatasync;
+persistRange calls msync.
+end note
+
+@enduml

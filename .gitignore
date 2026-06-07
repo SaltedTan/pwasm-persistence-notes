@@ -1,0 +1,16 @@
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# VS Code personal settings
+.vscode/
+
+# Temporary files
+*.tmp
+*.bak
+
+# Optional: ignore PNG exports; prefer SVG for diagrams
+*.png
