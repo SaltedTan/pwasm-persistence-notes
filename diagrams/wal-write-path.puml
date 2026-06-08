@@ -2,30 +2,47 @@
 !include style.puml
 
 title PWasm WAL-Oriented Write Path
-caption External research note; update caption with Wizard Engine commit hash/date.
+caption Wizard Engine commit 6cd1c0c7084a00ec5a3ea6022e37d53bf166e187, 2026-06-08.
 
 actor Caller
-participant "PWRegion / transaction layer" as PW
-participant "WAL BackendRegion" as WALRegion
-participant "Data BackendRegion" as DataRegion
-participant "TxnRegionBackend" as Backend
+participant "PWRegion" as PW
+participant "RegionTransaction\n(write-behind cache)" as Txn
+participant "RegionWal\n(block 1 WAL)" as WAL
+participant "Mapped region bytes" as Bytes
+participant "BackendRegion" as BackendRegion
 
-Caller -> PW : begin update
+Caller -> PW : metadata/chunk update
+PW -> Txn : writeU8/writeI16/writeU64/writeI64(addr, value)
+Txn -> Txn : cache[addr] = CachedUpdate(value, width)
 
-PW -> WALRegion : write log record bytes
-PW -> WALRegion : persistRange(logOffset, logSize)
-WALRegion -> Backend : persistRange(region, offset, size)
-Backend --> WALRegion : WAL bytes durable
+Caller -> PW : operation reaches performCommit()
+PW -> Txn : commit()
 
-PW -> DataRegion : mutate ordinary data bytes
-PW -> DataRegion : markDirty(dataOffset, dataSize)
-DataRegion -> Backend : markDirty(region, offset, size)
+Txn -> WAL : append(offset, value, width) for each cached addr
+WAL -> Bytes : store LogEntry(offset, value, width)
 
-PW -> DataRegion : persistChanges()
-DataRegion -> Backend : persistChanges(region)
-Backend --> DataRegion : dirty changes durable/prepared
+Txn -> WAL : commit()
+WAL -> Bytes : header.numEntries = currentEntryIndex
+WAL -> Bytes : header.checksum = calculateLogChecksum(...)
+WAL -> BackendRegion : persistRange(entryBase - regionStart, entryBytes)
+BackendRegion --> WAL : log entries durable
+WAL -> Bytes : header.status = 1
+WAL -> BackendRegion : persistRange(logChunkAddr - regionStart, LogHeader.size)
+BackendRegion --> WAL : committed header durable
 
-PW -> WALRegion : write commit/header update
-PW -> WALRegion : persistRange(headerOffset, headerSize)
+Txn -> WAL : applyUpdate(offset, value, width) for each cached addr
+WAL -> Bytes : Pointer.store width-sized value
+WAL -> BackendRegion : prepareChangedRange(offset, width)
+
+Txn -> WAL : fenceAppliedUpdates()
+WAL -> BackendRegion : persistChanges()
+BackendRegion --> WAL : data changes durable
+
+Txn -> WAL : clear()
+WAL -> Bytes : header.numEntries = 0\nheader.status = 0\nheader.checksum = 0
+WAL -> BackendRegion : persistRange(logChunkAddr - regionStart, LogHeader.size)
+BackendRegion --> WAL : cleared header durable
+
+Txn -> Txn : clear cached updates
 
 @enduml
