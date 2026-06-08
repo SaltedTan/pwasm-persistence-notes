@@ -2,34 +2,38 @@
 !include style.puml
 
 title PWasm Persistence Backend: Current Class Structure
-caption External research note; Wizard Engine commit b60c3e875445a95f5508a681b9751e3ebbe3b3dc (2026-06-04).
+caption External research note; Wizard Engine commit 4f4657749480ba58628f65837ca25184d1fd91d7 (2026-06-08).
 
 package "Portable API" {
   class BackendRegion {
     +range: Range<byte>
-    +backend: TxnRegionBackend
-    +markDirty(offset: u64, size: u64): bool
+    +destroy()
+    +prepareChangedRange(offset: u64, size: u64): bool
     +persistChanges(): bool
     +persistRange(offset: u64, size: u64): bool
   }
 
-  abstract class TxnRegionBackend {
+  class TxnRegionBackend {
     +create(size: u64, prot: int): BackendRegion
-    +destroy(region: BackendRegion)
-    +markDirty(region: BackendRegion, offset: u64, size: u64): bool
-    +persistChanges(region: BackendRegion): bool
-    +persistRange(region: BackendRegion, offset: u64, size: u64): bool
     +isPersistent(): bool
     +name(): string
   }
 
-  class VolatileBackend
+  enum BackendProt {
+    NONE
+    READ
+    WRITE
+    EXEC
+  }
 }
 
 package "x86-64 mmap implementation" {
   class FdMmapRegion {
     +mapping: Mapping
     +fd: int
+    +validRange(offset: u64, size: u64): bool
+    +cleanupBeforeDestroy()
+    +closeFd()
   }
 
   class FileMmapRegion {
@@ -40,47 +44,44 @@ package "x86-64 mmap implementation" {
     +hasPendingWriteback: bool
   }
 
-  abstract class MmapTxnRegionBackend {
-    +destroy(region: BackendRegion)
-    +validRange(region: BackendRegion, offset: u64, size: u64): bool
-    +asFdRegion(region: BackendRegion): FdMmapRegion
-    +closeFdRegion(region: BackendRegion)
+  class PmemMmapBackend {
+    +path: string
+    +makePersistentRegion(mapping: Mapping, fd: int): PmemMmapRegion
   }
 
-  class PmemMmapBackend
-  class FileMmapBackend
+  class FileMmapBackend {
+    +path: string
+    +makeFileRegion(mapping: Mapping, fd: int): FileMmapRegion
+  }
 }
 
-BackendRegion --> TxnRegionBackend : delegates to
-
-TxnRegionBackend <|-- VolatileBackend
-TxnRegionBackend <|-- MmapTxnRegionBackend
-MmapTxnRegionBackend <|-- PmemMmapBackend
-MmapTxnRegionBackend <|-- FileMmapBackend
+TxnRegionBackend <|-- PmemMmapBackend
+TxnRegionBackend <|-- FileMmapBackend
 
 BackendRegion <|-- FdMmapRegion
 FdMmapRegion <|-- FileMmapRegion
 FdMmapRegion <|-- PmemMmapRegion
 
-PmemMmapBackend ..> PmemMmapRegion : downcasts
-FileMmapBackend ..> FileMmapRegion : downcasts
+PmemMmapBackend ..> PmemMmapRegion : creates
+FileMmapBackend ..> FileMmapRegion : creates
 
 note right of TxnRegionBackend
-Design question:
-Should the backend interface own all region operations,
-or should region objects become typed capabilities?
+Current shape:
+backends create regions and report capabilities,
+but regions do not retain backend references;
+region objects own lifecycle and persistence behavior.
 end note
 
-note bottom of PmemMmapBackend
+note bottom of PmemMmapRegion
 PMEM path:
-markDirty flushes cache lines;
+prepareChangedRange flushes cache lines;
 persistChanges issues the fence;
 persistRange flushes and fences immediately.
 end note
 
-note bottom of FileMmapBackend
+note bottom of FileMmapRegion
 File mmap path:
-markDirty records dirty state;
+prepareChangedRange records dirty state;
 persistChanges calls fdatasync;
 persistRange calls msync.
 end note
