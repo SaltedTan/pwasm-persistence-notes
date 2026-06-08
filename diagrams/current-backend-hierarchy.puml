@@ -2,7 +2,7 @@
 !include style.puml
 
 title PWasm Persistence Backend: Current Class Structure
-caption External research note; update caption with Wizard Engine commit hash/date.
+caption External research note; Wizard Engine commit b60c3e875445a95f5508a681b9751e3ebbe3b3dc (2026-06-04).
 
 package "Portable API" {
   class BackendRegion {
