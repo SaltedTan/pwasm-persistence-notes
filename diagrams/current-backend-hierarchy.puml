@@ -18,13 +18,6 @@ package "Portable API" {
     +isPersistent(): bool
     +name(): string
   }
-
-  enum BackendProt {
-    NONE
-    READ
-    WRITE
-    EXEC
-  }
 }
 
 package "x86-64 mmap implementation" {
