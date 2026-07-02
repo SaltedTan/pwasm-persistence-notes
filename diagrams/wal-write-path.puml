@@ -1,48 +1,75 @@
 @startuml
 !include style.puml
 
-title PWasm WAL-Oriented Write Path
-caption Wizard Engine commit 6cd1c0c7084a00ec5a3ea6022e37d53bf166e187, 2026-06-08.
+title PWasm WAL-Oriented Write Path (multi-transaction WAL)
+caption Wizard Engine commit 8b262f4c24497bd2c5abe37c4b84c40dd4a97bf8, 2026-07-02.
 
 actor Caller
 participant "PWRegion" as PW
 participant "RegionTransaction\n(write-behind cache)" as Txn
-participant "RegionWal\n(block 1 WAL)" as WAL
+participant "MultiTxnWal\n(block 1 ring log)" as WAL
 participant "Mapped region bytes" as Bytes
 participant "BackendRegion" as BackendRegion
 
 Caller -> PW : metadata/chunk update
 PW -> Txn : writeU8/writeI16/writeU64/writeI64(addr, value)
-Txn -> Txn : cache[addr] = CachedUpdate(value, width)
+Txn -> Txn : cache[addr] = CachedUpdate(value, width)\naddrs.put(addr) on first touch
 
 Caller -> PW : operation reaches performCommit()
-PW -> Txn : commit()
+PW -> Txn : commit() : bool
+note right of Txn
+Clean-txn guard: commit() on a
+non-dirty cache is a no-op (returns true).
+end note
 
+== 1. Buffer entries ==
 Txn -> WAL : append(offset, value, width) for each cached addr
-WAL -> Bytes : store LogEntry(offset, value, width)
+WAL -> WAL : pendingEntries.put(WalPendingEntry(...))
 
-Txn -> WAL : commit()
-WAL -> Bytes : header.numEntries = currentEntryIndex
-WAL -> Bytes : header.checksum = calculateLogChecksum(...)
-WAL -> BackendRegion : persistRange(entryBase - regionStart, entryBytes)
-BackendRegion --> WAL : log entries durable
-WAL -> Bytes : header.status = 1
-WAL -> BackendRegion : persistRange(logChunkAddr - regionStart, LogHeader.size)
-BackendRegion --> WAL : committed header durable
+== 2. Commit point: one contiguous durable record ==
+Txn -> WAL : commit() : txnSeq
+WAL -> Bytes : reserveRecord() -> ring slot (wrap-around;\nlazy checkpoint + retry if the ring is full)
+WAL -> Bytes : write TxnRecordHeader (magic/version/epoch/txnSeq)\n+ LogEntry[] + TxnCommitTrailer + FNV checksum
+WAL -> BackendRegion : persistRange(record) -- COMMIT POINT
+BackendRegion --> WAL : record durable
+WAL -> WAL : activeRecords.put(...); activeBytes += len; nextTxnSeq++
+WAL --> Txn : txnSeq (0 = failure)
+note right of Txn
+On txnSeq == 0 the commit fails: return false,
+cache stays dirty (writes retained, not lost).
+Surfaced as blankChunkHandle / false by
+allocChunk() / freeChunk().
+end note
 
+== 3. Apply after-images to the region ==
 Txn -> WAL : applyUpdate(offset, value, width) for each cached addr
-WAL -> Bytes : Pointer.store width-sized value
+WAL -> Bytes : writeAfterImage -- Pointer.store width-sized value
 WAL -> BackendRegion : prepareChangedRange(offset, width)
+Txn -> WAL : noteApplied(txnSeq)
+WAL -> WAL : appliedSeqVolatile = txnSeq (if contiguous)
 
-Txn -> WAL : fenceAppliedUpdates()
-WAL -> BackendRegion : persistChanges()
-BackendRegion --> WAL : data changes durable
+== 4. Best-effort checkpoint (publish durable floor) ==
+Txn -> WAL : maybeCheckpoint() : bool
+note right of WAL
+Hybrid count-OR-occupancy policy, per-backend
+thresholds chosen via checkpointCost():
+  lag >= checkpointTxnThreshold, OR
+  activeBytes >= checkpointFillPercent% of ringBytes
+end note
+alt checkpoint triggered
+  WAL -> BackendRegion : persistChanges() -- after-images durable
+  WAL -> Bytes : writeSuperblock(durableAppliedSeq = appliedSeqVolatile, epoch)
+  WAL -> BackendRegion : persistRange(inactive superblock copy), then swap
+  WAL -> WAL : durableAppliedSeq = targetSeq; reclaimAppliedRecords()
+end
+note right of Txn
+A failed maybeCheckpoint() does NOT fail the
+commit -- data stays WAL-recoverable; only a
+Trace.OUT diagnostic is emitted.
+end note
 
-Txn -> WAL : clear()
-WAL -> Bytes : header.numEntries = 0\nheader.status = 0\nheader.checksum = 0
-WAL -> BackendRegion : persistRange(logChunkAddr - regionStart, LogHeader.size)
-BackendRegion --> WAL : cleared header durable
-
-Txn -> Txn : clear cached updates
+== 5. Clear cache in place ==
+Txn -> Txn : cache.remove(addr) for each; addrs.clear()\n(reuses map + vector storage across commits)
+Txn --> PW : true
 
 @enduml

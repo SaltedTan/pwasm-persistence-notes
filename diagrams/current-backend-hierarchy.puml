@@ -2,19 +2,26 @@
 !include style.puml
 
 title PWasm Persistence Backend: Current Class Structure
-caption External research note; Wizard Engine commit 4f4657749480ba58628f65837ca25184d1fd91d7 (2026-06-08).
+caption External research note; Wizard Engine commit 8b262f4c24497bd2c5abe37c4b84c40dd4a97bf8 (2026-07-02).
+
+enum CheckpointCost {
+  FREE
+  CHEAP
+  EXPENSIVE
+}
 
 package "Portable API" {
   class BackendRegion {
     +range: Range<byte>
     +destroy()
+    +checkpointCost(): CheckpointCost
     +prepareChangedRange(offset: u64, size: u64): bool
     +persistChanges(): bool
     +persistRange(offset: u64, size: u64): bool
   }
 
   class TxnRegionBackend {
-    +create(size: u64, prot: int): BackendRegion
+    +create(size: u64, prot: int, fresh: bool): BackendRegion
     +isPersistent(): bool
     +name(): string
   }
@@ -31,10 +38,12 @@ package "x86-64 mmap implementation" {
 
   class FileMmapRegion {
     +hasDirtyChanges: bool
+    +checkpointCost(): EXPENSIVE
   }
 
   class PmemMmapRegion {
     +hasPendingWriteback: bool
+    +checkpointCost(): CHEAP
   }
 
   class PmemMmapBackend {
@@ -58,11 +67,25 @@ FdMmapRegion <|-- PmemMmapRegion
 PmemMmapBackend ..> PmemMmapRegion : creates
 FileMmapBackend ..> FileMmapRegion : creates
 
+BackendRegion ..> CheckpointCost : reports
+
 note right of TxnRegionBackend
 Current shape:
 backends create regions and report capabilities,
 but regions do not retain backend references;
 region objects own lifecycle and persistence behavior.
+create(size, prot, fresh): fresh=true zero-initialises
+the backing store; fresh=false attaches to an existing
+store (may fall back to fresh if none exists).
+end note
+
+note right of CheckpointCost
+Relative cost of a checkpoint(); the WAL reads it via
+checkpointCost() to size its checkpoint thresholds.
+  FREE      VolatileRegion (no persistence)
+  CHEAP     PmemMmapRegion (store fences)
+  EXPENSIVE FileMmapRegion (fdatasync + superblock msync)
+Base BackendRegion default: EXPENSIVE.
 end note
 
 note bottom of PmemMmapRegion

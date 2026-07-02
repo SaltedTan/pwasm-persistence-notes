@@ -1,0 +1,37 @@
+@startuml
+!include style.puml
+
+title PWasm Persistence Backend Capabilities
+caption Wizard Engine commit 8b262f4c24497bd2c5abe37c4b84c40dd4a97bf8, 2026-07-02.
+caption Durability semantics per BackendRegion implementation.
+
+legend top
+Backend capability matrix
+|=  |= VolatileRegion |= PmemMmapRegion |= FileMmapRegion |
+|<b>backend name()</b> | "volatile" | "pmem" | "file" |
+|<b>isPersistent()</b> | false | true | true |
+|<b>checkpointCost()</b> | FREE | CHEAP | EXPENSIVE |
+|<b>backing</b> | Array<byte> (GC) | mmap MAP_SYNC (PMEM/DAX) | mmap file (block device) |
+|<b>fresh=true</b> | new Array is zero-init | O_TRUNC + zero-fill | O_TRUNC + zero-fill |
+|<b>prepareChangedRange</b> | no-op (true) | flushRange (CLWB*), set pending | mark hasDirtyChanges |
+|<b>persistChanges</b> | no-op (true) | storeFence (SFENCE*) if pending | fdatasync(fd) if dirty |
+|<b>persistRange</b> | no-op (true) | flushRange + storeFence | pageAlignedSyncRange (msync) |
+endlegend
+
+note bottom
+* PMEM flushRange/storeFence (CLWB/SFENCE) are currently
+no-op stubs (MmapRegionUtils) pending Virgil inline-asm;
+PMEM durability is not yet functional. See ROADMAP Next Steps #2.
+
+checkpointCost() drives the WAL's per-backend checkpoint
+thresholds: FREE checkpoints on nearly every commit,
+EXPENSIVE checkpoints lazily. Unknown backends default to
+EXPENSIVE.
+
+prepareChangedRange/persistChanges is the two-phase data
+path (used by applyUpdate + maybeCheckpoint); persistRange
+is the synchronous ordered path (used for WAL records and
+superblock writes).
+end note
+
+@enduml

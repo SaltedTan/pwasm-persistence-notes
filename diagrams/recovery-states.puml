@@ -1,0 +1,75 @@
+@startuml
+!include style.puml
+
+title PWasm MultiTxnWal Recovery States
+caption Wizard Engine commit 8b262f4c24497bd2c5abe37c4b84c40dd4a97bf8, 2026-07-02.
+caption MultiTxnWal.recover(); replay floor = durableAppliedSeq (loaded from newest-generation WalSuperblock).
+
+[*] --> LoadSuperblock : mount()
+
+state "Load superblock" as LoadSuperblock
+LoadSuperblock : loadSuperblock() picks the valid copy
+LoadSuperblock : with the higher generation
+LoadSuperblock : -> durableAppliedSeq, logEpoch
+LoadSuperblock --> ScanRing : openOk
+LoadSuperblock --> Failed : corrupt / !openOk
+
+state "Scan ring" as ScanRing
+ScanRing : scanCommittedRecords() walks the ring
+ScanRing : validateRecord() keeps only records with
+ScanRing : good magic/version/size, matching logEpoch,
+ScanRing : valid entry widths, and a good FNV checksum
+ScanRing --> SelectPrefix
+
+state "Select contiguous prefix" as SelectPrefix
+SelectPrefix : selectContiguousPrefix(candidates)
+SelectPrefix : takes the run whose txnSeq is contiguous
+SelectPrefix : from durableAppliedSeq + 1
+SelectPrefix --> Redo : selected not empty
+SelectPrefix --> GapAbandon : empty but candidates exist\n(sequence gap)
+SelectPrefix --> NothingToReplay : no candidates
+
+state "Redo records" as Redo
+Redo : for each selected record redoRecord()
+Redo : (writeAfterImage of every LogEntry);
+Redo : appliedSeqVolatile advances per record
+Redo --> PersistData
+
+state "Persist replayed data" as PersistData
+PersistData : backendRegion.persistChanges()
+PersistData --> Failed : persist fails
+PersistData --> PublishReplay : ok
+
+state "Publish replay" as PublishReplay
+PublishReplay : writeSuperblock(recoveredMaxSeq, logEpoch + 1)
+PublishReplay : logEpoch++  (fences replayed records)
+PublishReplay : durableAppliedSeq = recoveredMaxSeq
+PublishReplay : reset headOffset / activeRecords
+PublishReplay --> Recovered : superblock durable
+PublishReplay --> Failed : superblock write fails
+
+state "Gap-abandon" as GapAbandon
+GapAbandon : valid records after a gap are NOT applied
+GapAbandon : writeSuperblock(durableAppliedSeq, logEpoch + 1)
+GapAbandon : logEpoch++ ; currentGeneration++
+GapAbandon : reset volatile state
+GapAbandon --> Clean
+
+state "Nothing to replay" as NothingToReplay
+NothingToReplay : nextTxnSeq = durableAppliedSeq + 1
+NothingToReplay : appliedSeqVolatile = durableAppliedSeq
+NothingToReplay : reset volatile state
+NothingToReplay --> Clean
+
+Recovered --> [*] : recover() = true
+Clean --> [*] : recover() = false (no replay)
+Failed --> [*] : recover() = false (aborted)
+
+note right of PublishReplay
+Epoch bump is the anti-double-apply guard:
+after the new superblock is durable, the just-replayed
+current-epoch records no longer match logEpoch, so a
+later mount cannot re-apply them.
+end note
+
+@enduml
